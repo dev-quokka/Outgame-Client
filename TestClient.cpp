@@ -205,11 +205,11 @@ void TestClient::RecvThread() {
         std::vector<char> packet(buffer, buffer + len);
 
         if (IsNotifyPacket(packetId)) {
-            // 알림 패킷 → 바로 화면 출력
+            // 알림 패킷 (화면에 바로 출력)
             HandleNotify(packetId, packet.data(), len);
         }
         else {
-            // 응답 패킷 → 큐에 넣기
+            // 응답 패킷 (큐에 넣기)
             std::lock_guard<std::mutex> lock(responseMtx);
             responseQueue.push(std::move(packet));
             responseCv.notify_one();
@@ -259,8 +259,31 @@ void TestClient::HandleNotify(uint16_t packetId, const char* data, int len) {
     case PACKET_ID::FRIEND_ACCEPT_NOTIFY: {
         auto p = reinterpret_cast<const FRIEND_ACCEPT_NOTIFY*>(data);
         const char* msg = p->accept == 0 ? "수락" : "거절";
-        std::cout << "[알림] 친구 요청 " << msg
-            << " (pk: " << p->friendPk << ")\n";
+        std::cout << "[알림] " << p->senderId
+            << "이(가) 친구 요청을 " << msg << "했습니다\n";
+
+        std::lock_guard<std::mutex> lock(pendingMtx);
+        if (p->accept == 0) {
+            // 수락 -> sentRequests에서 제거 + friends에 추가
+            for (auto it = sentRequests.begin(); it != sentRequests.end(); ++it) {
+                if (std::string(it->friendId) == std::string(p->senderId)) {
+                    FriendInfo fi = *it;
+                    fi.friendStatus = 1;
+                    friends.push_back(fi);
+                    sentRequests.erase(it);
+                    break;
+                }
+            }
+        }
+        else {
+            // 거절 -> sentRequests에서 제거
+            sentRequests.erase(
+                std::remove_if(sentRequests.begin(), sentRequests.end(),
+                    [&](const FriendInfo& f) {
+                        return std::string(f.friendId) == std::string(p->senderId);
+                    }),
+                sentRequests.end());
+        }
         break;
     }
     case PACKET_ID::FRIEND_STATUS_NOTIFY: {
@@ -576,15 +599,27 @@ void TestClient::ManageFriendRequests() {
         std::cin >> targetId;
         AcceptFriend(targetId, 0);
 
-        // receivedRequests에서 제거 → friends에 추가
-        std::lock_guard<std::mutex> lock(pendingMtx);
-        for (auto it = receivedRequests.begin(); it != receivedRequests.end(); ++it) {
+        { // receivedRequests에서 찾아서 friends로 이동
+            std::lock_guard<std::mutex> lock(pendingMtx);
+            for (auto it = receivedRequests.begin(); it != receivedRequests.end(); ++it) {
+                if (std::string(it->friendId) == targetId) {
+                    FriendInfo fi = *it;
+                    fi.friendStatus = 1;
+                    friends.push_back(fi);
+                    receivedRequests.erase(it);
+                    return;  // 찾았으면 끝
+                }
+            }
+        }
+
+        // sentRequests에서도 찾아서 friends로 이동
+        for (auto it = sentRequests.begin(); it != sentRequests.end(); ++it) {
             if (std::string(it->friendId) == targetId) {
                 FriendInfo fi = *it;
                 fi.friendStatus = 1;
                 friends.push_back(fi);
-                receivedRequests.erase(it);
-                break;
+                sentRequests.erase(it);
+                return;  // 찾았으면 끝
             }
         }
     }

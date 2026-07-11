@@ -145,8 +145,8 @@ struct FRIEND_ACTION_RESPONSE : PACKET_HEADER {
 };
 
 struct FRIEND_ACCEPT_NOTIFY : PACKET_HEADER {
-    uint32_t friendPk = 0;
-    uint8_t  accept = 0;  // 0=수락, 1=거절
+    char    senderId[MAX_USER_ID_LEN] = {};
+    uint8_t accept = 0;  // 0=수락, 1=거절
 };
 
 struct FRIEND_STATUS_NOTIFY : PACKET_HEADER {
