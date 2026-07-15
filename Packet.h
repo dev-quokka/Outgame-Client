@@ -150,8 +150,8 @@ struct FRIEND_ACCEPT_NOTIFY : PACKET_HEADER {
 };
 
 struct FRIEND_STATUS_NOTIFY : PACKET_HEADER {
-    uint32_t friendPk = 0;
-    uint8_t  onlineStatus = 0;
+    char    senderId[MAX_USER_ID_LEN] = {};
+    uint8_t onlineStatus = 0;
 };
 
 // ====================== ÄÚ½ºÆ¬ º¯°æ ======================
@@ -248,13 +248,13 @@ struct PARTY_INFO_PACKET : PACKET_HEADER {
 
 struct PARTY_JOIN_NOTIFY : PACKET_HEADER {
     char     userId[MAX_USER_ID_LEN] = {};
+    uint32_t partyId = 0;
     uint32_t userPk = 0;
+    uint16_t userLevel = 0;
     uint32_t head = 0;
     uint32_t body = 0;
     uint32_t legs = 0;
     uint32_t feet = 0;
-    uint16_t userLevel = 0; 
-    uint8_t  memberCount = 0; 
 };
 
 struct PARTY_LEAVE_REQUEST : PACKET_HEADER {};
@@ -280,7 +280,7 @@ struct PARTY_KICK_RESPONSE : PACKET_HEADER {
 };
 
 struct PARTY_KICK_NOTIFY : PACKET_HEADER {
-    uint32_t userPk = 0;
+    char kickedUserId[MAX_USER_ID_LEN] = {};
 };
 
 struct PARTY_DELEGATE_REQUEST : PACKET_HEADER {

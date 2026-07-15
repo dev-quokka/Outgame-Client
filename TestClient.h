@@ -38,6 +38,7 @@ public:
     void ChangeCostume();
 
     // ====================== 파티 기능 ======================
+    void ShowPartyInfo();
     void PartyFollow();
     void PartyInvite();
     void PartyInviteAccept(const std::string& senderId, uint8_t accept);
@@ -91,4 +92,20 @@ private:
     UserInfo    userInfo;
     Currency userCurrency;
     Costume  userCostume;
+
+    // 파티 정보
+    struct PartyMemberInfo {
+        std::string userId;
+        uint16_t userLevel = 0;
+        uint32_t head = 0;
+        uint32_t body = 0;
+        uint32_t legs = 0;
+        uint32_t feet = 0;
+        uint8_t  onlineStatus = 1;
+    };
+
+    // 현재 파티 상태
+    uint32_t currentPartyId = 0;
+    std::string partyLeaderId;
+    std::vector<PartyMemberInfo> partyMembers;
 };

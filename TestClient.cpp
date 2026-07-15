@@ -184,35 +184,40 @@ bool TestClient::ConnectLobby() {
 // ====================== recv 스레드 ======================
 
 void TestClient::RecvThread() {
-    char buffer[PACKET_SIZE];
-
+    char buffer[4096];
     while (running) {
-        memset(buffer, 0, PACKET_SIZE);
-        int len = recv(lobbySkt, buffer, PACKET_SIZE, 0);
+        memset(buffer, 0, sizeof(buffer));
+        int len = recv(lobbySkt, buffer, sizeof(buffer), 0);
 
         if (len <= 0) {
-            if (running) {
-                std::cerr << "\n[RecvThread] 서버 연결 끊김\n";
-            }
+            if (running) std::cerr << "\n[RecvThread] 서버 연결 끊김\n";
             running = false;
             responseCv.notify_all();
             break;
         }
 
-        auto header = reinterpret_cast<PACKET_HEADER*>(buffer);
-        uint16_t packetId = header->PacketId;
+        int offset = 0;
+        while (offset < len) {
+            if (len - offset < (int)sizeof(PACKET_HEADER)) break;
 
-        std::vector<char> packet(buffer, buffer + len);
+            auto header = reinterpret_cast<PACKET_HEADER*>(buffer + offset);
+            uint16_t packetId = header->PacketId;
+            uint16_t packetLen = header->PacketLength;
 
-        if (IsNotifyPacket(packetId)) {
-            // 알림 패킷 (화면에 바로 출력)
-            HandleNotify(packetId, packet.data(), len);
-        }
-        else {
-            // 응답 패킷 (큐에 넣기)
-            std::lock_guard<std::mutex> lock(responseMtx);
-            responseQueue.push(std::move(packet));
-            responseCv.notify_one();
+            if (packetLen <= 0 || offset + packetLen > len) break;
+
+            std::vector<char> packet(buffer + offset, buffer + offset + packetLen);
+
+            if (IsNotifyPacket(packetId)) {
+                HandleNotify(packetId, packet.data(), packetLen);
+            }
+            else {
+                std::lock_guard<std::mutex> lock(responseMtx);
+                responseQueue.push(std::move(packet));
+                responseCv.notify_one();
+            }
+
+            offset += packetLen;
         }
     }
 }
@@ -290,8 +295,16 @@ void TestClient::HandleNotify(uint16_t packetId, const char* data, int len) {
         auto p = reinterpret_cast<const FRIEND_STATUS_NOTIFY*>(data);
         const char* status = p->onlineStatus == 0 ? "오프라인" :
             p->onlineStatus == 1 ? "로비" : "게임중";
-        std::cout << "[알림] 친구 상태 변경 (pk: " << p->friendPk
-            << ") → " << status << '\n';
+        std::cout << "[알림] " << p->senderId << " → " << status << '\n';
+
+        // friends 목록 onlineStatus 업데이트
+        std::lock_guard<std::mutex> lock(pendingMtx);
+        for (auto& f : friends) {
+            if (std::string(f.friendId) == std::string(p->senderId)) {
+                f.onlineStatus = p->onlineStatus;
+                break;
+            }
+        }
         break;
     }
     case PACKET_ID::COSTUME_CHANGE_NOTIFY: {
@@ -314,15 +327,37 @@ void TestClient::HandleNotify(uint16_t packetId, const char* data, int len) {
     }
     case PACKET_ID::PARTY_INFO_PACKET: {
         auto p = reinterpret_cast<const PARTY_INFO_PACKET*>(data);
-        std::cout << "[알림] 파티 정보 (ID: " << p->partyId
-            << ", 파티장 pk: " << p->leaderPk
-            << ", " << (int)p->memberCount << "명)\n";
+
+        std::lock_guard<std::mutex> lock(pendingMtx);
+        currentPartyId = p->partyId;
+        partyMembers.clear();
+        partyLeaderId = "";
+
         for (int i = 0; i < p->memberCount; i++) {
             auto& m = p->members[i];
+            PartyMemberInfo info;
+            info.userId = std::string(m.userId);
+            info.userLevel = m.userLevel;
+            info.head = m.head;
+            info.body = m.body;
+            info.legs = m.legs;
+            info.feet = m.feet;
+            partyMembers.push_back(info);
+
+            if (m.userPk == p->leaderPk) {
+                partyLeaderId = info.userId;
+            }
+        }
+
+        std::cout << "[알림] 파티 정보 (ID: " << p->partyId
+            << ", " << (int)p->memberCount << "명)\n";
+        for (auto& m : partyMembers) {
+            const char* leaderMark = (m.userId == partyLeaderId) ? " [파티장]" : "";
             std::cout << "  " << m.userId
                 << " Lv." << m.userLevel
                 << " [" << m.head << "/" << m.body
-                << "/" << m.legs << "/" << m.feet << "]\n";
+                << "/" << m.legs << "/" << m.feet << "]"
+                << leaderMark << '\n';
         }
         break;
     }
@@ -330,26 +365,79 @@ void TestClient::HandleNotify(uint16_t packetId, const char* data, int len) {
         auto p = reinterpret_cast<const PARTY_JOIN_NOTIFY*>(data);
         std::cout << "[알림] 파티원 입장: " << p->userId
             << " Lv." << p->userLevel << '\n';
+
+        std::lock_guard<std::mutex> lock(pendingMtx);
+
+        // 내가 파티에 없었는데 입장 알림 왔으면 → 파티 생성된 거
+        if (currentPartyId == 0) {
+            currentPartyId = p->partyId;  // PARTY_JOIN_NOTIFY에 partyId 있어야 함
+
+            // 나 자신도 파티원으로 추가
+            PartyMemberInfo myInfo;
+            myInfo.userId = userId;  // 내 아이디
+            myInfo.userLevel = userInfo.level;
+            partyMembers.push_back(myInfo);
+            partyLeaderId = userId;  // 초대한 쪽이 파티장
+        }
+
+        // 새 멤버 추가
+        PartyMemberInfo info;
+        info.userId = std::string(p->userId);
+        info.userLevel = p->userLevel;
+        info.head = p->head;
+        info.body = p->body;
+        info.legs = p->legs;
+        info.feet = p->feet;
+        partyMembers.push_back(info);
         break;
     }
     case PACKET_ID::PARTY_LEAVE_NOTIFY: {
         auto p = reinterpret_cast<const PARTY_LEAVE_NOTIFY*>(data);
         std::cout << "[알림] 파티원 탈퇴 (pk: " << p->userPk << ")";
-        if (p->newLeaderPk == 0)
+        if (p->newLeaderPk == 0) {
             std::cout << " → 파티 해산";
-        else
-            std::cout << " → 새 파티장: " << p->newLeaderPk;
+            std::lock_guard<std::mutex> lock(pendingMtx);
+            currentPartyId = 0;
+            partyMembers.clear();
+            partyLeaderId = "";
+        }
         std::cout << '\n';
         break;
     }
+
     case PACKET_ID::PARTY_KICK_NOTIFY: {
         auto p = reinterpret_cast<const PARTY_KICK_NOTIFY*>(data);
-        std::cout << "[알림] 파티 강퇴 (pk: " << p->userPk << ")\n";
+
+        std::lock_guard<std::mutex> lock(pendingMtx);
+
+        if (std::string(p->kickedUserId) == userId) {
+            // 내가 강퇴당함
+            std::cout << "[알림] 파티에서 강퇴되었습니다.\n";
+            currentPartyId = 0;
+            partyMembers.clear();
+            partyLeaderId = "";
+        }
+        else {
+            // 다른 유저가 강퇴됨 → 멤버 목록에서 제거
+            std::cout << "[알림] " << p->kickedUserId
+                << "이(가) 파티에서 강퇴되었습니다.\n";
+            partyMembers.erase(
+                std::remove_if(partyMembers.begin(), partyMembers.end(),
+                    [&](const PartyMemberInfo& m) {
+                        return m.userId == std::string(p->kickedUserId);
+                    }),
+                partyMembers.end());
+        }
         break;
     }
     case PACKET_ID::PARTY_DELEGATE_NOTIFY: {
         auto p = reinterpret_cast<const PARTY_DELEGATE_NOTIFY*>(data);
-        std::cout << "[알림] 새 파티장: pk " << p->newLeaderPk << '\n';
+
+        std::lock_guard<std::mutex> lock(pendingMtx);
+        for (auto& m : partyMembers) {
+            // pk로 비교 못 하니까 일단 로그만
+        }
+        std::cout << "[알림] 파티장이 변경되었습니다\n";
         break;
     }
     case PACKET_ID::PARTY_MEMBER_STATUS_NOTIFY: {
@@ -495,6 +583,7 @@ void TestClient::SearchUser() {
 
         auto followRes = reinterpret_cast<PARTY_FOLLOW_RESPONSE*>(followPacket.data());
         if (followRes->isSuccess) {
+            currentPartyId = followRes->partyId;
             std::cout << "[PartyFollow] 파티 입장 성공 (partyId: "
                 << followRes->partyId << ")\n";
         }
@@ -906,6 +995,10 @@ void TestClient::PartyLeave() {
 
     auto res = reinterpret_cast<PARTY_LEAVE_RESPONSE*>(packet.data());
     if (res->isSuccess) {
+        std::lock_guard<std::mutex> lock(pendingMtx);
+        currentPartyId = 0;
+        partyMembers.clear();
+        partyLeaderId = "";
         std::cout << "[PartyLeave] 파티 탈퇴 완료\n";
     }
     else {
@@ -994,5 +1087,45 @@ void TestClient::MatchStart() {
         default: reason = "서버 오류"; break;
         }
         std::cout << "[MatchStart] 실패: " << reason << '\n';
+    }
+}
+
+void TestClient::ShowPartyInfo() {
+    // 현재 파티 정보가 없으면
+    if (currentPartyId == 0) {
+        std::cout << "\n===== 파티 정보 =====\n";
+        std::cout << "  파티에 소속되어 있지 않습니다.\n";
+        return;
+    }
+
+    // 파티 정보 표시
+    std::cout << "\n===== 파티 정보 (ID: " << currentPartyId << ") =====\n";
+    for (int i = 0; i < (int)partyMembers.size(); i++) {
+        auto& m = partyMembers[i];
+        const char* leaderMark = (m.userId == partyLeaderId) ? " [파티장]" : "";
+        const char* onlineStr =
+            m.onlineStatus == 0 ? " (오프라인)" : "";
+        std::cout << "  " << i + 1 << ". " << m.userId
+            << " Lv." << m.userLevel
+            << " [" << m.head << "/" << m.body
+            << "/" << m.legs << "/" << m.feet << "]"
+            << leaderMark << onlineStr << '\n';
+    }
+
+    // 서브 메뉴
+    std::cout << "\n  1. 파티 탈퇴\n";
+    std::cout << "  2. 파티원 강퇴 (파티장)\n";
+    std::cout << "  3. 파티장 위임 (파티장)\n";
+    std::cout << "  0. 뒤로가기\n";
+    std::cout << "> ";
+
+    uint16_t select;
+    std::cin >> select;
+
+    switch (select) {
+    case 1: PartyLeave(); break;
+    case 2: PartyKick(); break;
+    case 3: PartyDelegate(); break;
+    case 0: return;
     }
 }
