@@ -84,7 +84,7 @@ bool TestClient::TryLogin(const std::string& userId_, const std::string& passwor
     if (!loginRes->isSuccess) {
         std::cerr << "[Login] 로그인 실패. failCode: "
             << (int)loginRes->failCode << '\n';
-        return false; 
+        return false;
     }
 
     // 세션 데이터 저장
@@ -99,7 +99,9 @@ bool TestClient::TryLogin(const std::string& userId_, const std::string& passwor
     std::cout << "  유저: " << userId << " / Lv." << userInfo.level
         << " / BP: " << userCurrency.bp
         << " / GCoin: " << userCurrency.gcoin << '\n';
-    std::cout << "  로비 서버: " << lobbyIp << ":" << lobbyPort << '\n';
+
+    if (lobbyPort == 9011) std::cout << "  로비 서버 1" << '\n';
+    else if (lobbyPort == 9012) std::cout << "  로비 서버 2" << '\n';
 
     // 인벤토리
     auto invenRes = reinterpret_cast<USER_INVENTORY_PACKET*>(recvBuf + offset);
@@ -251,43 +253,86 @@ void TestClient::HandleNotify(uint16_t packetId, const char* data, int len) {
         std::cout << "[알림] 친구 요청: " << p->senderId
             << " (Lv." << p->senderLevel << ")\n";
 
-        // receivedRequests에 바로 추가
-        FriendInfo fi;
-        strncpy_s(fi.friendId, p->senderId, _TRUNCATE);
-        fi.friendStatus = 2;  // 받은 요청
-        fi.onlineStatus = p->onlineStatus;
-
         std::lock_guard<std::mutex> lock(pendingMtx);
-        receivedRequests.push_back(fi);
+
+        bool exists = false;
+        for (auto& r : receivedRequests) {
+            if (std::string(r.friendId) == std::string(p->senderId)) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            FriendInfo fi;
+            strncpy_s(fi.friendId, p->senderId, _TRUNCATE);
+            fi.friendStatus = 2;
+            fi.onlineStatus = p->onlineStatus;
+            receivedRequests.push_back(fi);
+        }
         break;
     }
     case PACKET_ID::FRIEND_ACCEPT_NOTIFY: {
         auto p = reinterpret_cast<const FRIEND_ACCEPT_NOTIFY*>(data);
-        const char* msg = p->accept == 0 ? "수락" : "거절";
-        std::cout << "[알림] " << p->senderId
-            << "이(가) 친구 요청을 " << msg << "했습니다\n";
 
         std::lock_guard<std::mutex> lock(pendingMtx);
+
         if (p->accept == 0) {
-            // 수락 -> sentRequests에서 제거 + friends에 추가
-            for (auto it = sentRequests.begin(); it != sentRequests.end(); ++it) {
-                if (std::string(it->friendId) == std::string(p->senderId)) {
-                    FriendInfo fi = *it;
-                    fi.friendStatus = 1;
-                    friends.push_back(fi);
-                    sentRequests.erase(it);
+            // 수락
+            std::cout << "[알림] " << p->senderId
+                << "이(가) 친구 요청을 수락했습니다\n";
+
+            bool exists = false;
+            for (auto& f : friends) {
+                if (std::string(f.friendId) == std::string(p->senderId)) {
+                    exists = true;
                     break;
                 }
             }
-        }
-        else {
-            // 거절 -> sentRequests에서 제거
+            if (!exists) {
+                FriendInfo fi;
+                strncpy_s(fi.friendId, p->senderId, _TRUNCATE);
+                fi.friendStatus = 1;
+                fi.onlineStatus = 1;
+                friends.push_back(fi);
+            }
             sentRequests.erase(
                 std::remove_if(sentRequests.begin(), sentRequests.end(),
                     [&](const FriendInfo& f) {
                         return std::string(f.friendId) == std::string(p->senderId);
                     }),
                 sentRequests.end());
+        }
+        else {
+            // 거절 또는 삭제
+            // friends에 있으면 삭제된 거
+            bool wasFriend = false;
+            for (auto& f : friends) {
+                if (std::string(f.friendId) == std::string(p->senderId)) {
+                    wasFriend = true;
+                    break;
+                }
+            }
+
+            if (wasFriend) {
+                std::cout << "[알림] " << p->senderId
+                    << "이(가) 친구를 삭제했습니다\n";
+                friends.erase(
+                    std::remove_if(friends.begin(), friends.end(),
+                        [&](const FriendInfo& f) {
+                            return std::string(f.friendId) == std::string(p->senderId);
+                        }),
+                    friends.end());
+            }
+            else {
+                std::cout << "[알림] " << p->senderId
+                    << "이(가) 친구 요청을 거절했습니다\n";
+                sentRequests.erase(
+                    std::remove_if(sentRequests.begin(), sentRequests.end(),
+                        [&](const FriendInfo& f) {
+                            return std::string(f.friendId) == std::string(p->senderId);
+                        }),
+                    sentRequests.end());
+            }
         }
         break;
     }
@@ -320,9 +365,19 @@ void TestClient::HandleNotify(uint16_t packetId, const char* data, int len) {
             << " (Lv." << p->senderLevel
             << ", 파티 " << (int)p->memberCount << "명)\n";
 
-        // 저장
         std::lock_guard<std::mutex> lock(pendingMtx);
-        pendingPartyInvites.push_back(*p);
+
+        // 중복 체크
+        bool exists = false;
+        for (auto& inv : pendingPartyInvites) {
+            if (std::string(inv.senderId) == std::string(p->senderId)) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            pendingPartyInvites.push_back(*p);
+        }
         break;
     }
     case PACKET_ID::PARTY_INFO_PACKET: {
@@ -368,27 +423,49 @@ void TestClient::HandleNotify(uint16_t packetId, const char* data, int len) {
 
         std::lock_guard<std::mutex> lock(pendingMtx);
 
-        // 내가 파티에 없었는데 입장 알림 왔으면 → 파티 생성된 거
+        // 파티에 처음 들어온 거면 (따라가기 당한 쪽) 본인 먼저 추가
         if (currentPartyId == 0) {
-            currentPartyId = p->partyId;  // PARTY_JOIN_NOTIFY에 partyId 있어야 함
+            currentPartyId = p->partyId;
+            partyLeaderId = userId;  // 따라가기 당한 쪽이 파티장
 
-            // 나 자신도 파티원으로 추가
-            PartyMemberInfo myInfo;
-            myInfo.userId = userId;  // 내 아이디
-            myInfo.userLevel = userInfo.level;
-            partyMembers.push_back(myInfo);
-            partyLeaderId = userId;  // 초대한 쪽이 파티장
+            // 본인 추가
+            bool selfExists = false;
+            for (auto& m : partyMembers) {
+                if (m.userId == userId) {
+                    selfExists = true;
+                    break;
+                }
+            }
+            if (!selfExists) {
+                PartyMemberInfo myInfo;
+                myInfo.userId = userId;
+                myInfo.userLevel = userInfo.level;
+                myInfo.head = userCostume.head;
+                myInfo.body = userCostume.body;
+                myInfo.legs = userCostume.legs;
+                myInfo.feet = userCostume.feet;
+                partyMembers.push_back(myInfo);
+            }
         }
 
-        // 새 멤버 추가
-        PartyMemberInfo info;
-        info.userId = std::string(p->userId);
-        info.userLevel = p->userLevel;
-        info.head = p->head;
-        info.body = p->body;
-        info.legs = p->legs;
-        info.feet = p->feet;
-        partyMembers.push_back(info);
+        // 새 멤버 추가 (중복 체크)
+        bool exists = false;
+        for (auto& m : partyMembers) {
+            if (m.userId == std::string(p->userId)) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            PartyMemberInfo info;
+            info.userId = std::string(p->userId);
+            info.userLevel = p->userLevel;
+            info.head = p->head;
+            info.body = p->body;
+            info.legs = p->legs;
+            info.feet = p->feet;
+            partyMembers.push_back(info);
+        }
         break;
     }
     case PACKET_ID::PARTY_LEAVE_NOTIFY: {
@@ -452,7 +529,7 @@ void TestClient::HandleNotify(uint16_t packetId, const char* data, int len) {
         break;
     }
 
-    std::cout << "> ";  
+    std::cout << "> ";
     std::cout.flush();
 }
 
@@ -550,11 +627,21 @@ void TestClient::SearchUser() {
         if (friendRes->isSuccess) {
             std::cout << "[FriendRequest] " << targetId << "에게 친구 요청 전송\n";
 
-            FriendInfo fi;
-            strncpy_s(fi.friendId, targetId.c_str(), _TRUNCATE);
-            fi.friendStatus = 0;
-            fi.onlineStatus = res->onlineStatus;
-            sentRequests.push_back(fi);
+            // 중복 체크
+            bool exists = false;
+            for (auto& s : sentRequests) {
+                if (std::string(s.friendId) == targetId) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                FriendInfo fi;
+                strncpy_s(fi.friendId, targetId.c_str(), _TRUNCATE);
+                fi.friendStatus = 0;
+                fi.onlineStatus = res->onlineStatus;
+                sentRequests.push_back(fi);
+            }
         }
         else {
             const char* reason;
@@ -609,8 +696,6 @@ void TestClient::ShowFriendList() {
     bool hasFriend = false;
 
     for (auto& f : friends) {
-        if (f.friendStatus != 1) continue;  // 친구만 표시
-
         const char* onlineStr =
             f.onlineStatus == 0 ? "오프라인" :
             f.onlineStatus == 1 ? "로비" : "게임중";
@@ -627,7 +712,7 @@ void TestClient::ShowFriendList() {
     }
 
     std::cout << "\n  1. 친구 삭제\n";
-    std::cout << "  2. 친구 요청 보내기\n";
+    std::cout << "  2. 따라가기 (파티 입장)\n";   // 변경
     std::cout << "  0. 뒤로가기\n";
     std::cout << "> ";
 
@@ -638,10 +723,37 @@ void TestClient::ShowFriendList() {
         std::string targetId;
         std::cout << "삭제할 친구 ID: ";
         std::cin >> targetId;
-        AcceptFriend(targetId, 1);  // action=1 삭제
+        AcceptFriend(targetId, 1);
+
+        // friends에서 제거
+        std::lock_guard<std::mutex> lock(pendingMtx);
+        friends.erase(
+            std::remove_if(friends.begin(), friends.end(),
+                [&](const FriendInfo& f) {
+                    return std::string(f.friendId) == targetId;
+                }),
+            friends.end());
+        std::cout << "[친구 삭제] " << targetId << " 삭제 완료\n";
     }
     else if (select == 2) {
-        SendFriendRequest();
+        std::string targetId;
+        std::cout << "따라갈 친구 ID: ";
+        std::cin >> targetId;
+
+        // 온라인 체크
+        bool isOnline = false;
+        for (auto& f : friends) {
+            if (std::string(f.friendId) == targetId && f.onlineStatus != 0) {
+                isOnline = true;
+                break;
+            }
+        }
+        if (!isOnline) {
+            std::cout << "[따라가기] 해당 친구가 오프라인입니다.\n";
+            return;
+        }
+
+        PartyFollow(targetId);
     }
 }
 
@@ -886,11 +998,7 @@ void TestClient::ManagePartyInvites() {
 
 // ====================== 파티 따라가기 ======================
 
-void TestClient::PartyFollow() {
-    std::string targetId;
-    std::cout << "따라갈 유저 ID: ";
-    std::cin >> targetId;
-
+void TestClient::PartyFollow(const std::string& targetId) {
     PARTY_FOLLOW_REQUEST req;
     req.PacketId = (uint16_t)PACKET_ID::PARTY_FOLLOW_REQUEST;
     req.PacketLength = sizeof(req);
@@ -905,17 +1013,13 @@ void TestClient::PartyFollow() {
 
     auto res = reinterpret_cast<PARTY_FOLLOW_RESPONSE*>(packet.data());
     if (res->isSuccess) {
-        std::cout << "[PartyFollow] 파티 입장 성공 (partyId: " << res->partyId << ")\n";
+        currentPartyId = res->partyId;
+        std::cout << "[PartyFollow] 파티 입장 성공 (partyId: "
+            << res->partyId << ")\n";
     }
     else {
-        const char* reason;
-        switch (res->failCode) {
-        case 1: reason = "파티장 아님"; break;
-        case 2: reason = "파티 꽉 참"; break;
-        case 3: reason = "이미 파티에 있음"; break;
-        default: reason = "유저 없음 또는 서버 오류"; break;
-        }
-        std::cout << "[PartyFollow] 실패: " << reason << '\n';
+        std::cout << "[PartyFollow] 실패. failCode: "
+            << (int)res->failCode << '\n';
     }
 }
 

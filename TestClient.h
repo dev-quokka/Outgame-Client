@@ -39,7 +39,7 @@ public:
 
     // ====================== 파티 기능 ======================
     void ShowPartyInfo();
-    void PartyFollow();
+    void PartyFollow(const std::string& targetId);
     void PartyInvite();
     void PartyInviteAccept(const std::string& senderId, uint8_t accept);
     void PartyLeave();

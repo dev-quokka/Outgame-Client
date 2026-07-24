@@ -53,14 +53,12 @@ int main() {
         std::cout << "   2.  친구 목록\n";
         std::cout << "   3.  친구 요청 관리\n";
         std::cout << "   4.  코스튬 변경\n";
-        std::cout << "   5.  파티 따라가기\n";
-        std::cout << "   6.  파티 초대\n";
-        std::cout << "   7.  파티 초대 관리\n";
-        std::cout << "   8.  파티 확인\n";         
-        std::cout << "   9.  매칭 시작\n";         
+        std::cout << "   5.  파티 초대\n";
+        std::cout << "   6.  파티 초대 관리\n";
+        std::cout << "   7.  파티 확인\n";
+        std::cout << "   8.  매칭 시작\n";
         std::cout << "   0.  종료\n";
         std::cout << "================================\n";
-        std::cout << "> ";
 
         uint16_t select;
         std::cin >> select;
@@ -71,11 +69,10 @@ int main() {
         case 2:  client.ShowFriendList();       break;
         case 3:  client.ManageFriendRequests(); break;
         case 4:  client.ChangeCostume();        break;
-        case 5:  client.PartyFollow();          break;
-        case 6:  client.PartyInvite();          break;
-        case 7:  client.ManagePartyInvites();   break;
-        case 8:  client.ShowPartyInfo();        break;  // 내부에서 탈퇴/강퇴/위임
-        case 9:  client.MatchStart();           break;
+        case 5:  client.PartyInvite();          break;
+        case 6:  client.ManagePartyInvites();   break;
+        case 7:  client.ShowPartyInfo();        break;
+        case 8:  client.MatchStart();           break;
         case 0:
             std::cout << "종료합니다.\n";
             client.Disconnect();

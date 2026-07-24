@@ -169,7 +169,7 @@ struct COSTUME_CHANGE_RESPONSE : PACKET_HEADER {
 };
 
 struct COSTUME_CHANGE_NOTIFY : PACKET_HEADER {
-    char     userId[MAX_USER_ID_LEN] = {};  
+    char     userId[MAX_USER_ID_LEN] = {};
     uint32_t userPk = 0;
     uint32_t itemCode = 0;
     uint8_t  slot = 0;
